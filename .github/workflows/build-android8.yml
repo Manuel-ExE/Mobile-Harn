@@ -1,0 +1,81 @@
+name: Build Android 8 APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-android8:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Unpack Mobile Harness source
+        run: |
+          unzip -q Mobile-Harness-1.0.10.zip -d src
+          PROJECT_ROOT=$(dirname "$(find src -name settings.gradle.kts | head -1)")
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          echo "Project root: $PROJECT_ROOT"
+
+      - name: Apply Android 8 flavor patch
+        run: |
+          python3 - <<'EOF'
+          import pathlib
+          candidates = [p for p in pathlib.Path('src').rglob('build.gradle.kts') if 'minSdk = 28' in p.read_text()]
+          assert candidates, 'app build.gradle.kts with minSdk = 28 not found'
+          p = candidates[0]
+          t = p.read_text()
+          t = t.replace('flavorDimensions += "runtimeDelivery"',
+                        'flavorDimensions += "runtimeDelivery"\n    flavorDimensions += "osSupport"', 1)
+          t = t.replace('productFlavors {',
+                        'productFlavors {\n'
+                        '        create("modern") {\n'
+                        '            dimension = "osSupport"\n'
+                        '        }\n'
+                        '        create("android8") {\n'
+                        '            dimension = "osSupport"\n'
+                        '            minSdk = 26\n'
+                        '            applicationIdSuffix = ".android8"\n'
+                        '            versionNameSuffix = "-android8"\n'
+                        '        }', 1)
+          p.write_text(t)
+          print('patched', p)
+          EOF
+
+      - name: Placeholder runtime bundles if absent
+        run: |
+          if [ -d "$PROJECT_ROOT/dist/runtime-bundles" ]; then
+            ls "$PROJECT_ROOT/dist/runtime-bundles"
+          else
+            mkdir -p "$PROJECT_ROOT/dist/runtime-bundles"
+            for f in pocketdev-agy-arm64-2026.09.1.tar.zst pocketdev-core-arm64-2026.09.5.tar.zst pocketdev-claude-arm64-2026.11.1.tar.zst pocketdev-python-arm64-2026.09.2.tar.zst pocketdev-android-arm64-2026.09.1.tar.zst pocketdev-dsh-arm64-2026.09.1.tar.zst; do
+              touch "$PROJECT_ROOT/dist/runtime-bundles/$f"
+            done
+            echo "::warning::runtime bundles missing from archive; placeholder files created (runtime download will still work online)"
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android-sdk@v3
+        with:
+          accept-android-sdk-licenses: true
+          cmdline-tools-version: latest
+          cmake-version: 3.22.1
+          ndk: 26.1.10909125
+          platform: 36
+          build-tools: 36.0.0
+
+      - name: Build Android 8 debug APK (API 26-27)
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: ./gradlew :app:assembleAndroid8OnlineDebug -PmhNdkVersion=26.1.10909125 --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile-harness-1.0.10-android8
+          path: ${{ env.PROJECT_ROOT }}/app/build/outputs/apk/android8Online/debug/*.apk
